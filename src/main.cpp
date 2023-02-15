@@ -24,6 +24,8 @@
 #define LED_BUILTIN_ON          digitalWrite(LED_BUILTIN, false)
 #define LED_BUILTIN_OFF         digitalWrite(LED_BUILTIN, true)
 
+#define OFFGRIDDELAY_S          10
+
 typedef struct
 {
     struct
@@ -68,7 +70,7 @@ Param<Parameter_t> Parameter;
 GlobalData_t Data;
 Task ledTask(250);
 Task sensorTask(5000);
-Task modeSwitchTask(10000, false);
+Task modeSwitchTask(OFFGRIDDELAY_S * 1000, false);
 Task wifiTask(30000);
 UpTime upTime;
 WiFiClient wifiClient;
@@ -501,7 +503,8 @@ void setup()
 
     if(reason != DEEPSLEEP_RESET)
     {
-        Serial.printf("Starting off grid task in some seconds... \n");
+        Serial.printf("Starting off grid task in %u seconds... \n", OFFGRIDDELAY_S);
+        Serial.printf("Enter command 'stay' to abort.\n");
         modeSwitchTask.setLastTick(millis());
         modeSwitchTask.enable();
     }

@@ -235,7 +235,8 @@ CLI_COMMAND(info)
     Serial.printf("Network:\n");
     Serial.printf("  WiFi Status:   %s\n", WiFi.isConnected() ? "Connected" : "Connecting ...");
     Serial.printf("  WiFi IP:       %s\n", WiFi.localIP().toString().c_str());
-    Serial.printf("  MQTT Status:   %s\n", mqtt.isConnected() ? "Connected" : "Connecting ...");   
+    Serial.printf("  WiFi RSSI:     %d\n", WiFi.RSSI());
+    Serial.printf("  MQTT Status:   %s\n", mqtt.isConnected() ? "Connected" : "Connecting ...");
     Serial.printf("\n");
 
     return 0;
@@ -410,6 +411,7 @@ void offGridTask()
     payload = "{";
     payload += "\"battery_volt\":" + String(((float)Data.battery.mV)/1000, 3) + ",";
     payload += "\"battery_capacity\":" + String(Data.battery.capacity) + ",";
+    payload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
     payload += "\"air_temperature\":" + String(Data.air.temperature,3) + ",";
     payload += "\"air_humidity\":" + String(Data.air.humidity,3);
     payload += "}";

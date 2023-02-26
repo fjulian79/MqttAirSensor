@@ -36,6 +36,8 @@ class MqttClient
 
         bool isConnected(void);
 
+        void disconnect(void);
+
         bool publish(const char* topic, bool val, bool retain=true);
 
         bool publish(const char* topic, uint32_t val, bool retain=true);

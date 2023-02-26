@@ -74,6 +74,11 @@ bool MqttClient::isConnected(void)
     return Mqtt.connected();
 }
 
+void MqttClient::disconnect(void)
+{
+    return Mqtt.disconnect();
+}
+
 void MqttClient::setKeepAlive(uint16_t seconds)
 {
         Mqtt.setKeepAlive(seconds);
@@ -126,7 +131,8 @@ bool MqttClient::loop(void)
 
     if (!connected && (millis() - LastConnect > 10000))
     {
-       connected = connect();
+        disconnect();
+        connected = connect();
     }
 
    return connected;

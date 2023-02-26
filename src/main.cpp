@@ -12,11 +12,15 @@
 
 #include "mqttclient.hpp"
 
-#define VBAT_PIN                35
+/**
+ * The Setup Mode is intended to initialize parameters and
+ * calibrate the battery.
+ */
+//#define SETUP_MODE              1
 
+#define VBAT_PIN                35
 #define VBAT_DEFAULT_OFFSET     153
 #define VBAT_DEFAULT_NUM        1593
-
 #define VBAT_DEN                1024
 #define VBAT_MIN                3000
 #define VBAT_MAX                4200
@@ -176,6 +180,9 @@ void calib_vBat(void)
 
 void enterDeepSleep(uint32_t sleep_sec = 600, uint16_t delay_ms = 100)
 {
+    #ifdef SETUP_MODE
+    Serial.printf("WARNING: Deep sleep is disabled!\n");
+    #else
     /* For now there is a limmit of 2^45 usec .. respect this here */
     uint64_t usec = sleep_sec == UINT32_MAX ? (((uint64_t)0x1)<<45)-1 : sleep_sec * 1000000;
 
@@ -187,6 +194,7 @@ void enterDeepSleep(uint32_t sleep_sec = 600, uint16_t delay_ms = 100)
     }
 
     ESP.deepSleep(usec);
+    #endif
 }
 
 CLI_COMMAND(ver)
@@ -271,6 +279,8 @@ CLI_COMMAND(param)
     if (strcmp(argv[0], "clear") == 0)
     {
         Parameter.clear();
+        Parameter.data.battery.num = VBAT_DEFAULT_NUM;
+        Parameter.data.battery.offset = VBAT_DEFAULT_OFFSET;
         Serial.printf("Parameter cleared\n");
         return 0;
     }
@@ -286,6 +296,8 @@ CLI_COMMAND(param)
         Serial.printf("  broker passwd\n");
         Serial.printf("  topic\n");
         Serial.printf("  deep sleep seconds\n");
+        Serial.printf("  battery num\n");
+        Serial.printf("  battery offset\n");
         
         readString().toCharArray(Parameter.data.wifi.ssid, 
             sizeof(Parameter.data.wifi.ssid));
@@ -452,6 +464,8 @@ bool setup_wifi(void)
     ms = millis() - start;
     Serial.printf("%s (%ums)\n", WiFi.localIP().toString().c_str(), ms);
     randomSeed(micros()); 
+    
+    mqtt.begin(Parameter.data.mqttCfg);
 
     return true;   
 }
@@ -462,7 +476,6 @@ void setup()
 
     if (reason == RTCWDT_BROWN_OUT_RESET)
     {
-        
         enterDeepSleep();
     }
 
@@ -474,15 +487,18 @@ void setup()
     Serial.println();
     cmd_ver(0, 0);
 
+    #ifdef SETUP_MODE
+    Serial.printf("#####################################\n");
+    Serial.printf("## WARNING: Setup Mode is active!  ##\n");
+    Serial.printf("##          Deep sleep disabled.   ##\n");
+    Serial.printf("##          Offgrid task disabled. ##\n");
+    Serial.printf("#####################################\n\n");
+    #endif
+
     if(Parameter.begin() != true)
     {
         Serial.printf("Error: Invalid parameters.\n");
-    }
-    else
-    {
-        networking_enabled = true;
-        setup_wifi();
-        mqtt.begin(Parameter.data.mqttCfg);
+        enterDeepSleep();
     }
 
     readVBat();
@@ -498,9 +514,15 @@ void setup()
         Serial.printf("ERROR: Air Sensor not found.\n");
         enterDeepSleep();
     }
-
     readAirSensor();
 
+    if (Parameter.data.wifi.ssid[0] != 0 && Parameter.data.wifi.pass[0] != 0)
+    {
+        networking_enabled = true;
+        setup_wifi();
+    }
+
+    #ifndef SETUP_MODE
     if(reason != DEEPSLEEP_RESET)
     {
         Serial.printf("Starting off grid task in %u seconds... \n", OFFGRIDDELAY_S);
@@ -512,6 +534,7 @@ void setup()
     {
         offGridTask();
     }
+    #endif
     
     upTime.begin();
     cli.begin();
@@ -542,9 +565,9 @@ void loop()
     {
         if ((WiFi.status() != WL_CONNECTED) && wifiTask.isScheduled(now)) 
         {
-            Serial.println("Reconnecting to WiFi...");
             WiFi.disconnect();
-            WiFi.reconnect();
+            mqtt.disconnect();
+            setup_wifi();
         }
         mqtt.loop();
     }

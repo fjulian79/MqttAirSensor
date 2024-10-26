@@ -19,11 +19,24 @@
  *
  * You can file issues at https://github.com/fjulian79/MqttAirSensor/issues
  */
-
 #include <Arduino.h>
 #include <WiFi.h>
+#include <math.h>
 #include <rom/rtc.h>
+
+#if defined OUTDOOR_SENSOR
+#include <Adafruit_BME280.h>
+#define PROJECT_CONF            "Outdoor"
+#define AIRSENSOR_I2C_ADDR      0x76
+#define AirSensor_t             Adafruit_BME280
+#elif defined INDOOR_SENSOR
 #include <Adafruit_SHT31.h>
+#define PROJECT_CONF            "Indoor"
+#define AIRSENSOR_I2C_ADDR
+#define AirSensor_t             Adafruit_SHT31
+#else
+#error "Air Sensor not defined"
+#endif
 
 #include <generic/generic.hpp>
 #include <generic/task.hpp>
@@ -31,7 +44,6 @@
 #include <param/param.hpp>
 #include <cli/cli.hpp>
 #include <version/version.h>
-
 #include "mqttclient.hpp"
 
 /**
@@ -51,6 +63,8 @@
 #define LED_BUILTIN_OFF         digitalWrite(LED_BUILTIN, true)
 
 #define OFFGRIDDELAY_S          10
+
+#define DEEPSLEEP_SEC_DEFAULT   600
 
 typedef struct
 {
@@ -86,12 +100,17 @@ typedef struct
     struct 
     {
         float temperature;
-        float humidity;
+        float rel_humidity;
+        float abs_humidity;
+        float dew_point;
+#ifdef OUTDOOR_SENSOR
+        float pressure;
+#endif
     }air;
 
 }GlobalData_t;
 
-Adafruit_SHT31 AirSensor = Adafruit_SHT31();
+AirSensor_t AirSensor = AirSensor_t();
 Param<Parameter_t> Parameter;
 GlobalData_t Data;
 Task ledTask(250);
@@ -118,8 +137,33 @@ uint16_t sample(uint8_t pin, uint16_t samples)
 
 void readAirSensor()
 {
-    Data.air.temperature = AirSensor.readTemperature();
-    Data.air.humidity = AirSensor.readHumidity();
+    float a, b, gc, mw;
+    float t, tk, rh;
+    float svp, vp, v, dp, ah;
+
+    t = AirSensor.readTemperature();
+    rh = AirSensor.readHumidity();
+    tk = t + 273.15;
+    a = t >= 0 ? 7.5 : 7.6;
+    b = t >= 0 ? 237.3 : 240.7;
+    gc = 8314.3;
+    mw = 18.016;
+
+    svp = 6.1078 * pow(10, (a*t)/(b+t));
+    vp  = rh/100 * svp;
+    v = log10(vp/6.1078);
+    dp = (b*v) / (a-v);
+    ah = pow(10,5) * mw/gc * vp/tk;
+
+    Data.air.temperature = t;
+    Data.air.rel_humidity = rh;
+    Data.air.dew_point = dp;
+    Data.air.abs_humidity = ah;
+
+    #ifdef OUTDOOR_SENSOR
+    /* Sensor reading is in PA, /100 = hPA */
+    Data.air.pressure = AirSensor.readPressure() / 100.0;
+    #endif
 }
 
 void readVBat(uint16_t samples = 100)
@@ -200,7 +244,7 @@ void calib_vBat(void)
     Serial.printf("scale:  %u\n", Parameter.data.battery.num);
 }
 
-void enterDeepSleep(uint32_t sleep_sec = 600, uint16_t delay_ms = 100)
+void enterDeepSleep(uint32_t sleep_sec = DEEPSLEEP_SEC_DEFAULT, uint16_t delay_ms = 100)
 {
     #ifdef SETUP_MODE
     Serial.printf("WARNING: Deep sleep is disabled!\n");
@@ -209,6 +253,8 @@ void enterDeepSleep(uint32_t sleep_sec = 600, uint16_t delay_ms = 100)
     uint64_t usec = sleep_sec == UINT32_MAX ? (((uint64_t)0x1)<<45)-1 : sleep_sec * 1000000;
 
     LED_BUILTIN_OFF;
+
+    Serial.printf("About to enter deep sleep for %d seconds.\n", sleep_sec);
 
     if(delay > 0)
     {
@@ -223,13 +269,38 @@ CLI_COMMAND(ver)
 {
     Serial.printf("\n%s %s, Copyright (C) 2023 Julian Friedrich\n", 
             VERSION_PROJECT, VERSION_GIT_SHORT);
+    Serial.printf("Config:   " PROJECT_CONF "\n");
     Serial.printf("Build:    %s, %s\n", __DATE__, __TIME__);
     Serial.printf("Git Repo: %s\n", VERSION_GIT_REMOTE_ORIGIN);
     Serial.printf("Revision: %s\n", VERSION_GIT_LONG);
     Serial.printf("\n");
     Serial.printf("This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you\n");
     Serial.printf("are welcome to redistribute it under certain conditions.\n");
-    Serial.printf("See GPL v3 licence at https://www.gnu.org/licenses/ for details.\n\n");
+    Serial.printf("See GPL v3 licence at https://www.gnu.org/licenses/ for details.\n");
+    Serial.printf("\n");
+
+    return 0;
+}
+
+CLI_COMMAND(help)
+{
+    Serial.printf("Supported commands:\n");
+    Serial.printf("  ver                Used to print version infos.\n");
+    Serial.printf("  stay               Used to disable mqtt TX and deep sleep.\n");
+    Serial.printf("  param cmd ...      Parameter control, see below for supported commands:\n");
+    Serial.printf("    clear            Resets all values to default.\n");
+    Serial.printf("    write            To paste all values at once to the terminal.\n");
+    Serial.printf("    set name value   To set a single value. Valid names are:\n");
+    Serial.printf("                     ssid, wifi-pass, broker-ip, broker-port,\n");
+    Serial.printf("                     broker-user, broker-pass, topic, sleep,\n");
+    Serial.printf("                     batt-scale, batt-offs\n");
+    Serial.printf("    save             To write the parameter values to the flash.\n");
+    Serial.printf("  sleep <sec>        activate deep sleep, default sec = %d.\n", DEEPSLEEP_SEC_DEFAULT);
+    Serial.printf("  networking [0/1]   Disables or Enables networking at all.\n");
+    Serial.printf("  i2cdetect          To detect connected i2c slaves.\n");
+    Serial.printf("  reset              Used to reset the CPU.\n");
+    Serial.printf("  help               Prints this text.\n"); 
+    Serial.printf("\n");
 
     return 0;
 }
@@ -241,12 +312,13 @@ CLI_COMMAND(info)
     Serial.printf("  CPU's:         %u @ %uMHz\n", ESP.getChipCores(), ESP.getCpuFreqMHz());
     Serial.printf("  Flash:         %uMB, %uMhz, Mode 0x%0x\n", ESP.getFlashChipSize()/(1024*1024), ESP.getFlashChipSpeed()/1000000, ESP.getFlashChipMode());
     Serial.printf("  PSRAM:         %u free of %u\n", ESP.getFreePsram(), ESP.getPsramSize());
-    Serial.printf("  Heap:          %u free of %u\n", ESP.getHeapSize(), ESP.getFreeHeap());
+    Serial.printf("  Heap:          %u free of %u\n", ESP.getFreeHeap(), ESP.getHeapSize());
     Serial.printf("  MAC:           %s\n", WiFi.macAddress().c_str());
     Serial.printf("  Reset reason:  %u\n", esp_reset_reason());
     Serial.printf("  Up time:       %s\n", upTime.toString().c_str());
     Serial.printf("\n");
     Serial.printf("Parameter:\n");
+    Serial.printf("  DeepSleep:     %usec\n", Parameter.data.deepsleep_s);
     Serial.printf("  Battery:\n");
     Serial.printf("    Offset:      %u\n", Parameter.data.battery.offset);
     Serial.printf("    Scale:       %u\n", Parameter.data.battery.num);
@@ -257,12 +329,22 @@ CLI_COMMAND(info)
     Serial.printf("    Broker:      %s:%d\n", Parameter.data.mqttCfg.broker.ipaddr, Parameter.data.mqttCfg.broker.port);
     Serial.printf("    User:        %s\n", Parameter.data.mqttCfg.broker.user);
     Serial.printf("    Pass:        *****\n");
-    Serial.printf("    Timeout:     %u\n", Parameter.data.deepsleep_s);
+    Serial.printf("    Timeout:     %usec\n", mqtt.getKeepAlive());
     Serial.printf("    Topic:       %s\n", Parameter.data.mqttCfg.topic);
     Serial.printf("\n");
     Serial.printf("Sensor values:\n");
-    Serial.printf("  Battery:       %u.%03uV, %u%%, %u\r", Data.battery.mV/1000, Data.battery.mV%1000, Data.battery.capacity, Data.battery.raw);
-    Serial.printf("  Air:           %f°C, %f%%\n", Data.air.temperature, Data.air.humidity);
+    Serial.printf("  Battery:\n");
+    Serial.printf("    Volt:        %u.%03uV\n", Data.battery.mV/1000, Data.battery.mV%1000);
+    Serial.printf("    Cap:         %u%%\n", Data.battery.capacity);
+    Serial.printf("    Raw:         %u\n", Data.battery.raw);
+    Serial.printf("  Air:\n");
+    Serial.printf("    T:           %0.2f°C\n", Data.air.temperature);
+    Serial.printf("    RH:          %0.2f%%\n", Data.air.rel_humidity);
+    Serial.printf("    AH:          %0.2fml/m3\n", Data.air.abs_humidity);
+    Serial.printf("    DP:          %0.2f°C\n", Data.air.dew_point);
+#ifdef OUTDOOR_SENSOR
+    Serial.printf("    AP:          %0.2fhPa\n", Data.air.pressure);
+#endif
     Serial.printf("\n");
     Serial.printf("Network:\n");
     Serial.printf("  WiFi Status:   %s\n", WiFi.isConnected() ? "Connected" : "Connecting ...");
@@ -292,7 +374,20 @@ CLI_COMMAND(networking)
 CLI_COMMAND(stay)
 {
     modeSwitchTask.enable(false);
-    Serial.printf("Off grid task disabled, use TBD to start it manually.\n");
+    Serial.printf("Off grid task disabled.\n");
+    return 0;
+}
+
+CLI_COMMAND(sleep)
+{
+    uint16_t sleep_sec = DEEPSLEEP_SEC_DEFAULT;
+
+    if (argc > 0)
+    {
+        sleep_sec = atoi(argv[0]);
+    }
+
+    enterDeepSleep(sleep_sec);
     return 0;
 }
 
@@ -440,19 +535,49 @@ CLI_COMMAND(param)
     return -1;
 }
 
+CLI_COMMAND(i2cdetect)
+{
+    Serial.printf("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f\n");
+    for(uint8_t n=0; n < 8; n++)
+    {
+        Serial.printf("%x0: ", n);
+        for(uint8_t m=0; m < 16; m++)
+        {
+            uint8_t addr = (n*16) + m;
+            Wire.beginTransmission(addr);
+            if (Wire.endTransmission())
+            {
+                Serial.printf("-- ");
+            }
+            else
+            {
+                Serial.printf("%x%x ", n, m);
+            }
+        }
+        Serial.printf("\n");
+    }
+    Serial.printf("\n");
+
+    return 0;
+}
+
 void offGridTask() 
 {
     String payload;
 
     payload = "{";
-    payload += "\"battery_volt\":" + String(((float)Data.battery.mV)/1000, 3) + ",";
-    payload += "\"battery_capacity\":" + String(Data.battery.capacity) + ",";
-    payload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-    payload += "\"air_temperature\":" + String(Data.air.temperature,3) + ",";
-    payload += "\"air_humidity\":" + String(Data.air.humidity,3);
+    payload += "\"battery_volt\":" + String(((float)Data.battery.mV)/1000, 3);
+    payload += ",\"battery_capacity\":" + String(Data.battery.capacity);
+    payload += ",\"rssi\":" + String(WiFi.RSSI());
+    payload += ",\"air_temperature\":" + String(Data.air.temperature,3);
+    payload += ",\"air_humidity_rel\":" + String(Data.air.rel_humidity,3);
+    payload += ",\"air_humidity_abs\":" + String(Data.air.abs_humidity,3);
+    payload += ",\"air_dewpoint\":" + String(Data.air.dew_point,3);
+#ifdef OUTDOOR_SENSOR
+    payload += ",\"air_pressure\":" + String(Data.air.pressure,3);
+#endif
     payload += "}";
 
-    mqtt.setKeepAlive(Parameter.data.deepsleep_s + 120);
     if (mqtt.connect())
     {
         mqtt.publish("data", payload.c_str());
@@ -510,11 +635,11 @@ void setup()
     cmd_ver(0, 0);
 
     #ifdef SETUP_MODE
-    Serial.printf("#####################################\n");
-    Serial.printf("## WARNING: Setup Mode is active!  ##\n");
-    Serial.printf("##          Deep sleep disabled.   ##\n");
-    Serial.printf("##          Offgrid task disabled. ##\n");
-    Serial.printf("#####################################\n\n");
+    Serial.printf("#########################################\n");
+    Serial.printf("## WARNING: Setup Mode is active!      ##\n");
+    Serial.printf("##          - Deep sleep disabled.     ##\n");
+    Serial.printf("##          - Offgrid task disabled.   ##\n");
+    Serial.printf("#########################################\n\n");
     #endif
 
     if(Parameter.begin() != true)
@@ -522,6 +647,7 @@ void setup()
         Serial.printf("Error: Invalid parameters.\n");
         enterDeepSleep();
     }
+    mqtt.setKeepAlive(Parameter.data.deepsleep_s*2);
 
     readVBat();
     if (Data.battery.mV < VBAT_MIN)
@@ -531,9 +657,16 @@ void setup()
         enterDeepSleep();
     }
 
-    if (!AirSensor.begin()) 
+    if (!AirSensor.begin(AIRSENSOR_I2C_ADDR)) 
     {
         Serial.printf("ERROR: Air Sensor not found.\n");
+#if defined OUTDOOR_SENSOR
+        Serial.printf("SensorID was: 0x%x\n", AirSensor.sensorID());
+        Serial.printf("        ID of 0xFF probably means a bad address, a BMP 180 or BMP 085\n");
+        Serial.printf("        ID of 0x56-0x58 represents a BMP 280,\n");
+        Serial.printf("        ID of 0x60 represents a BME 280.\n");
+        Serial.printf("        ID of 0x61 represents a BME 680.\n");
+#endif
         enterDeepSleep();
     }
     readAirSensor();

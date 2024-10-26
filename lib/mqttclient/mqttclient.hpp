@@ -54,6 +54,8 @@ class MqttClient
 
         void setKeepAlive(uint16_t seconds);
 
+        uint16_t getKeepAlive(void);
+
         bool connect(void);
 
         bool isConnected(void);
@@ -73,12 +75,15 @@ class MqttClient
         bool loop(void);
 
     private:
-    
+
         MqttClientCfg_t& Config;
 
         PubSubClient Mqtt;
 
         uint32_t LastConnect;
+
+        uint16_t KeepAlive_sec;
+
 };
 
 #endif /* _MQTTCLIENT_HPP_ */

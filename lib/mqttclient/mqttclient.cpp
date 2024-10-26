@@ -29,6 +29,7 @@ MqttClient::MqttClient(Client& client) :
       Config(zero)
     , Mqtt(client)
     , LastConnect(0)
+    , KeepAlive_sec(1200)
 {
     
 }
@@ -37,6 +38,7 @@ MqttClient::MqttClient(Client& client, MqttClientCfg_t& config) :
       Config(config)
     , Mqtt(client)
     , LastConnect(0)
+    , KeepAlive_sec(1200)
 {
     
 }
@@ -73,6 +75,8 @@ bool MqttClient::connect(void)
 
     LastConnect = millis();
 
+    Mqtt.setKeepAlive(KeepAlive_sec);
+
     status = Mqtt.connect(
         clientId.c_str(), 
         Config.broker.user, 
@@ -103,7 +107,12 @@ void MqttClient::disconnect(void)
 
 void MqttClient::setKeepAlive(uint16_t seconds)
 {
-        Mqtt.setKeepAlive(seconds);
+    KeepAlive_sec = seconds;
+}
+
+uint16_t MqttClient::getKeepAlive(void)
+{
+    return KeepAlive_sec;
 }
 
 bool MqttClient::publish(const char* topic, bool val, bool retain)
